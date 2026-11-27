@@ -174,3 +174,44 @@ def test_initialize_contains_safe_schema(monkeypatch):
     assert 'NOT NULL UNIQUE' in sql
     assert 'DROP' not in sql.upper()
     assert fetch is False
+
+
+@pytest.mark.parametrize('body, message', [
+    ({'login': 'Makar', 'password': 'short'}, 'Пароль должен содержать не менее 8 символов.'),
+    ({'login': 'Makar', 'password': 'x' * 129}, 'Пароль должен содержать не более 128 символов.'),
+    ({'login': 'a', 'password': 'valid1234'}, 'Логин должен содержать не менее 3 символов.'),
+    ({'login': 'x' * 65, 'password': 'valid1234'}, 'Логин должен содержать не более 64 символов.'),
+    ({'login': 'bad login', 'password': 'valid1234'}, 'Логин может содержать только латинские буквы'),
+    ({'login': 'Makar'}, 'Введите пароль.'),
+    ({'password': 'valid1234'}, 'Введите логин.'),
+    ({'login': 'Makar', 'password': 12345}, 'Пароль должен быть строкой.'),
+    ({'login': 'Makar', 'password': 'valid1234', 'secret-extra': 'secret-value'}, 'В запросе присутствует лишнее поле.'),
+])
+def test_readable_validation(auth, body, message):
+    client, repo = auth
+    for path in ('/auth/register', '/auth/login'):
+        r = client.post(path, json=body)
+        assert r.status_code == 422
+        assert any(message in error['msg'] for error in r.json()['detail'])
+        assert all(set(error) == {'loc', 'type', 'msg'} for error in r.json()['detail'])
+        assert 'secret-extra' not in r.text and 'secret-value' not in r.text
+        assert not repo.rows
+
+
+def test_readable_console(auth, capsys):
+    from test import request
+    client, _ = auth
+    r = request(client, 'POST', '/auth/register', {'login': 'Makar', 'password': 'short'})
+    out = capsys.readouterr().out
+    assert r.status_code == 422
+    assert 'Пароль должен содержать не менее 8 символов.' in out
+    assert 'short' not in out and '"detail"' not in out
+    request(client, 'POST', '/auth/login', CREDS)
+    assert 'Неверный логин или пароль.' in capsys.readouterr().out
+
+
+def test_readable_invalid_json(auth):
+    client, _ = auth
+    r = client.post('/auth/register', content='{"password":', headers={'Content-Type': 'application/json'})
+    assert r.status_code == 422
+    assert r.json()['detail'][0]['msg'] == 'Некорректный формат JSON.'

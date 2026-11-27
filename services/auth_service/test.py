@@ -11,10 +11,10 @@ from uuid import uuid4
 import httpx
 import jwt
 if __package__:
-    from .auth import verify_token
+    from .auth import verify_token, validation_message
     from .main import load_config, key_path
 else:
-    from auth import verify_token
+    from auth import verify_token, validation_message
     from main import load_config, key_path
 
 
@@ -29,6 +29,42 @@ def credentials():
     return {'login': input('Логин: '), 'password': getpass('Пароль: ')}
 
 
+def show_error(status, data):
+    """Выводит понятную ошибку вместо технического JSON."""
+    detail = data.get('detail') if isinstance(data, dict) else None
+    if status == 422 and isinstance(detail, list):
+        print('Проверьте введённые данные:')
+        for error in detail:
+            if not isinstance(error, dict):
+                continue
+            loc = error.get('loc', [])
+            field = loc[-1] if isinstance(loc, list) and loc and loc[-1] in ('login', 'password') else 'body'
+            error_type = error.get('type')
+            if not isinstance(error_type, str):
+                error_type = ''
+            # Не печатаем произвольные данные сервера. Это работает и со старым API.
+            print('  - ' + validation_message(field, error_type))
+        return
+
+    messages = {
+        'login_taken': 'Этот логин уже занят. Выберите другой или войдите в аккаунт.',
+        'invalid_credentials': 'Неверный логин или пароль.',
+        'auth_db_unavailable': 'База данных временно недоступна. Попробуйте позже.',
+    }
+    fallback = {
+        400: 'Некорректный запрос.',
+        401: 'Не удалось подтвердить учётные данные.',
+        403: 'Доступ запрещён.',
+        404: 'Запрашиваемый адрес не найден.',
+        409: 'Конфликт данных.',
+        422: 'Проверьте введённые данные.',
+        429: 'Слишком много запросов. Попробуйте позже.',
+        503: 'Сервис временно недоступен. Попробуйте позже.',
+    }
+    default = 'Внутренняя ошибка сервера. Попробуйте позже.' if status >= 500 else 'Не удалось выполнить операцию.'
+    print('Ошибка: ' + messages.get(detail if isinstance(detail, str) else '', fallback.get(status, default)))
+
+
 def request(client, method, path, body=None, show=True):
     """Отправляет настоящий HTTP-запрос и показывает ответ без полного JWT."""
     if show:
@@ -41,8 +77,14 @@ def request(client, method, path, body=None, show=True):
         try:
             data = response.json()
         except ValueError:
-            print('[Ответ не в формате JSON]')
+            if response.is_error:
+                show_error(response.status_code, None)
+            else:
+                print('[Ответ не в формате JSON]')
         else:
+            if response.is_error:
+                show_error(response.status_code, data)
+                return response
             if isinstance(data, dict) and 'access_token' in data:
                 data = {**data, 'access_token': str(data['access_token'])[:30] + '... [скрыт]'}
             print(json.dumps(data, ensure_ascii=False, indent=2))
